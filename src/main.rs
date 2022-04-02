@@ -8,15 +8,7 @@ use lazy_static::lazy_static;
 use tokio::time::Instant;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::{Filter, hyper::{Response, header::CONTENT_TYPE}, http::HeaderValue};
-
-// lazy_static! {
-//     static ref sender: 
-//     static ref image: &'static RwLock<Vec<u8>> = {
-//         let img = RgbaImage::new(1000, 1000);
-
-//         Box::leak(Box::new(RwLock::new(Vec::new())))
-//     };
-// }
+use serde::{Deserialize, Serialize};
 
 struct Reservation {
     x: u16,
@@ -24,10 +16,16 @@ struct Reservation {
     end: Instant,
 }
 
+#[derive(Deserialize)]
+struct Query {
+    x: u16, y: u16
+}
+
 
 #[tokio::main]
 async fn main() {
     let (sender, receiver) = mpsc::unbounded_channel::<Reservation>();
+    let sender = Box::leak(Box::new(sender));
     // let active_reservations: Mutex<BTreeMap<Instant, (u8, u8)>> = todo!();
     // let image_buffer: Image
     
@@ -48,7 +46,7 @@ async fn main() {
 
     let add_fut = add_reservations(receiver, image, state);
     let exp_fut = expire_reservations(state, image);
-    let web_fut = serve(&sender, image);
+    let web_fut = serve(sender, image);
 
     tokio::join!(add_fut, exp_fut, web_fut);
 }
@@ -119,10 +117,10 @@ async fn expire_reservations(
 }
 
 async fn serve(
-    sender: &UnboundedSender<Reservation>,
+    sender: &'static UnboundedSender<Reservation>,
     image: &'static RwLock<Vec<u8>>,
 ) -> ! {
-    let hello = warp::path!("image")
+    let image = warp::path!("image")
         .and(warp::get())
         .map(|| {
             let lock =  image.read().unwrap();
@@ -131,10 +129,23 @@ async fn serve(
             let mut res = Response::new(data);
             res.headers_mut()
                 .insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
-            return res;
+            res
         });
 
-    warp::serve(hello)
+    let reserve = warp::path!("reserve")
+        .and(warp::get())
+        .and(warp::query::<Query>())
+        .map(|Query { x, y }| {
+            reserve(x, y, sender);
+            let mut res = Response::new("");
+            res
+        });
+
+    let routes = warp::any().and(
+        image.or(reserve)
+    );
+
+    warp::serve(routes)
         .run(([127, 0, 0, 1], 8000))
         .await;
 
