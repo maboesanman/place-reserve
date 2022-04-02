@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::{
     collections::HashSet,
     io::Cursor,
-    sync::{Mutex, RwLock, atomic::{AtomicUsize, Ordering}},
+    sync::{Mutex, RwLock, atomic::{AtomicUsize, Ordering}, Arc},
     time::Duration,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -54,15 +54,16 @@ async fn main() {
     // let image_buffer: Image
 
     let image_buffer = RgbaImage::new(X_DIM * 3, Y_DIM * 3);
-    let image: &'static RwLock<Vec<u8>> = {
+    let image: &'static RwLock<Arc<[u8]>> = {
         
         let mut cursor = Cursor::new(Vec::new());
         image_buffer
             .write_to(&mut cursor, ImageOutputFormat::Png)
             .unwrap();
         let vec = cursor.into_inner();
+        let arc: Arc<[u8]> = vec.into();
 
-        Box::leak(Box::new(RwLock::new(vec)))
+        Box::leak(Box::new(RwLock::new(arc)))
     };
 
     let cdn_id: &'static AtomicUsize = Box::leak(Box::new(0.into()));
@@ -84,7 +85,7 @@ async fn main() {
 async fn add_reservations(
     res_stream: UnboundedReceiver<Reservation>,
     exp_sender: UnboundedSender<Reservation>,
-    image: &'static RwLock<Vec<u8>>,
+    image: &'static RwLock<Arc<[u8]>>,
     state: &'static Mutex<State>
 ) -> ! {
     let res_stream = UnboundedReceiverStream::new(res_stream);
@@ -113,7 +114,7 @@ async fn add_reservations(
                     }));
                 }
             }
-            let vec = write_buf_to_vec(&state_lock.image_buffer);
+            let vec = write_buf_to_arc_slice(&state_lock.image_buffer);
             drop(state_lock);
 
             let mut image_lock = image.write().unwrap();
@@ -130,7 +131,7 @@ async fn add_reservations(
 async fn expire_reservations(
     exp_stream: UnboundedReceiver<Reservation>,
     state: &'static Mutex<State>,
-    image: &'static RwLock<Vec<u8>>,
+    image: &'static RwLock<Arc<[u8]>>,
     cdn_id: &'static AtomicUsize
 ) -> ! {
     let exp_stream = UnboundedReceiverStream::new(exp_stream);
@@ -151,7 +152,7 @@ async fn expire_reservations(
                     state_lock.image_buffer.put_pixel(3 * x + 1, 3 * y + 2, color);
                 }
             }
-            let vec = write_buf_to_vec(&state_lock.image_buffer);
+            let vec = write_buf_to_arc_slice(&state_lock.image_buffer);
             drop(state_lock);
 
             let mut image_lock = image.write().unwrap();
@@ -167,14 +168,16 @@ async fn expire_reservations(
 
 async fn serve(
     sender: &'static UnboundedSender<Reservation>,
-    image: &'static RwLock<Vec<u8>>,
+    image: &'static RwLock<Arc<[u8]>>,
     cdn_id: &'static AtomicUsize
 ) -> ! {
     let image = warp::path!("overlay.png").and(warp::get()).map(|| {
         let lock = image.read().unwrap();
         let data = lock.clone();
         drop(lock);
-        let mut res = Response::new(data);
+
+        let vec: Vec<_> = data.as_ref().to_owned();
+        let mut res = Response::new(vec);
         res.headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
         res
@@ -199,16 +202,16 @@ fn reserve(x: u32, y: u32, sender: &UnboundedSender<Reservation>, cdn_id: &'stat
     sender.send(Reservation { x, y, index: cdn_id.load(Ordering::SeqCst) }).unwrap();
 }
 
-fn write_buf_to_vec(buf: &RgbaImage) -> Vec<u8> {
+fn write_buf_to_arc_slice(buf: &RgbaImage) -> Arc<[u8]> {
     let mut cursor = Cursor::new(Vec::new());
     buf.write_to(&mut cursor, ImageOutputFormat::Png).unwrap();
-    cursor.into_inner()
+    cursor.into_inner().into()
 }
 
 async fn maintain_cdn_buf(
     state: &'static Mutex<State>,
     cdn_id: &'static AtomicUsize,
-    image: &'static RwLock<Vec<u8>>,
+    image: &'static RwLock<Arc<[u8]>>,
 ) -> ! {
     refresh_cdn_image(state, cdn_id, image, true).await;
     let mut interval = tokio::time::interval(CDN_REFRESH);
@@ -221,7 +224,7 @@ async fn maintain_cdn_buf(
 async fn refresh_cdn_image(
     state: &'static Mutex<State>,
     cdn_id: &'static AtomicUsize,
-    image: &'static RwLock<Vec<u8>>,
+    image: &'static RwLock<Arc<[u8]>>,
     force: bool,
 ) {
     let new_img_bytes = reqwest::get(CDN_URL).await.unwrap().bytes().await.unwrap();
@@ -237,7 +240,7 @@ async fn refresh_cdn_image(
     state_lock.image_buffer = RgbaImage::new(cdn_buf.width(), cdn_buf.height());
     state_lock.cdn_buffer = cdn_buf;
 
-    let vec = write_buf_to_vec(&state_lock.image_buffer);
+    let vec = write_buf_to_arc_slice(&state_lock.image_buffer);
     drop(state_lock);
 
     let mut image_lock = image.write().unwrap();
