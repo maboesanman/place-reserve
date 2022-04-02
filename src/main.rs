@@ -40,8 +40,8 @@ struct Query {
 const X_DIM: u32 = 2000;
 const Y_DIM: u32 = 1000;
 const TIMEOUT_DURATION: Duration = Duration::new(60 * 5, 0);
-// const CDN_URL: &'static str = "http://cdn.mirai.gg/tmp/dotted-place-template.png";
-const CDN_URL: &'static str = "https://cdn.discordapp.com/attachments/297619185926668290/959898636974702682/dotted_505png_v3.png";
+const CDN_URL: &'static str = "http://cdn.mirai.gg/tmp/dotted-place-template.png";
+// const CDN_URL: &'static str = "https://cdn.discordapp.com/attachments/297619185926668290/959898636974702682/dotted_505png_v3.png";
 const CDN_REFRESH: Duration = Duration::new(15, 0);
 
 #[tokio::main]
